@@ -30,14 +30,12 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // ── Call Anthropic API (handles multi-turn tool-use loop) ─────────────────────
 async function callClaude() {
-  const PROMPT = `You are writing a daily AI governance briefing for Jack McDermott, a Tufts University junior interning at Nielsen Holdings on the AI Governance Strategy team. Nielsen Holdings is a media measurement company (separate from NielsenIQ). Jack is building an AI governance function from scratch under Senior Director Suman Kumar Dubey.
+  const PROMPT = `Return ONLY a JSON object with no other text. You are creating a daily AI governance briefing for Jack McDermott, interning at Nielsen Holdings (media measurement company) on the AI Governance Strategy team.
 
-Search the web for real AI governance news from the past 48 hours. Return ONLY a valid JSON object — no markdown, no backticks, no explanation before or after it.
+Search the web for AI governance news from the past 48 hours. Return this exact JSON:
+{"date":"April 21 2026","sections":[{"label":"US Government & Policy","topline":"brief summary","stories":[{"tier":1,"headline":"title","tag":"legislation","source":"pub","body":"2-3 sentences","so_what":"Nielsen relevance","related":null,"sources":[{"label":"pub: title","url":"https://..."}]}]},{"label":"International Governments","topline":"","stories":[]},{"label":"Notable Corporate Actions","topline":"","stories":[]},{"label":"Legal Disputes & Enforcement","topline":"","stories":[]},{"label":"Research & Industry Reports","topline":"","stories":[]}]}
 
-Use exactly this shape:
-{"date":"today's full date","sections":[{"label":"US Government & Policy","topline":"one sentence summary of biggest theme","stories":[{"tier":1,"headline":"Story headline","tag":"one of: regulation, legislation, enforcement, corporate, international, litigation, research","source":"Publication name","body":"2-3 sentence factual summary with specific names, bill numbers, dollar amounts.","so_what":"One sentence on why this matters for someone building an AI governance function at a media measurement company like Nielsen.","related":null,"sources":[{"label":"Publication: Article title","url":"https://..."}]}]},{"label":"International Governments","topline":"...","stories":[]},{"label":"Notable Corporate Actions","topline":"...","stories":[]},{"label":"Legal Disputes & Enforcement","topline":"...","stories":[]},{"label":"Research & Industry Reports","topline":"...","stories":[]}]}
-
-Include exactly these 5 sections in order. Each section needs a topline and 2-3 stories. Tier: 1=must-read, 2=worth-knowing, 3=FYI. Each story needs 2-3 real source URLs. Be specific — name companies, bills, agencies, dollar amounts. Focus on: EU AI Act implementation, US federal/state AI legislation, corporate AI governance, FTC/regulatory enforcement, think tank research (CSET, Brookings), media/data industry AI policy.`;
+Rules: 5 sections in that exact order, 2-3 stories each, tiers 1-3, 2-3 real URLs per story. Focus on EU AI Act, US AI laws, corporate AI governance, FTC enforcement, AI research.`;
 
   const messages = [{ role: 'user', content: PROMPT }];
   const tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
