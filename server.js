@@ -1,90 +1,164 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// The Governance Wire — server.js
-// Deploy on Render.com (free tier, Node 18+)
+// The Governance Wire — server.js v2
+// Render.com deployment (Node 18+)
+//
+// Architecture: Make.com hits POST /generate with no body.
+// This server calls Claude API with web search, handles the full
+// multi-turn tool-use loop, builds the .docx, converts to PDF, returns base64.
+//
+// Endpoints:
+//   POST /generate   — triggers full pipeline, returns { pdf_base64, filename }
+//   GET  /health     — health check
 // ─────────────────────────────────────────────────────────────────────────────
 
 const express = require('express');
+const https   = require('https');
 const {
   Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle,
   ExternalHyperlink, UnderlineType, ShadingType, WidthType,
-  Table, TableRow, TableCell, PageBreak,
-  TabStopType, LeaderType
+  Table, TableRow, TableCell, PageBreak, TabStopType, LeaderType
 } = require('docx');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 app.use(express.json({ limit: '4mb' }));
-app.use(express.text({ limit: '4mb' }));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ── Extract digest JSON from any format Claude/Make might send ────────────────
-function extractDigest(body) {
-  // Collect all candidate text strings from the body
-  const candidates = [];
+// ── Call Anthropic API (handles multi-turn tool-use loop) ─────────────────────
+async function callClaude() {
+  const PROMPT = `You are writing a daily AI governance briefing for Jack McDermott, a Tufts University junior interning at Nielsen Holdings on the AI Governance Strategy team. Nielsen Holdings is a media measurement company (separate from NielsenIQ). Jack is building an AI governance function from scratch under Senior Director Suman Kumar Dubey.
 
-  if (typeof body === 'string') {
-    candidates.push(body);
-  } else if (body && typeof body === 'object') {
-    // Already a parsed digest
-    if (body.sections) return body;
-    // Claude full API response: { content: [{ type, text }, ...] }
-    if (Array.isArray(body.content)) {
-      for (const block of body.content) {
-        if (block.type === 'text' && block.text) candidates.push(block.text);
+Search the web for real AI governance news from the past 48 hours. Return ONLY a valid JSON object — no markdown, no backticks, no explanation before or after it.
+
+Use exactly this shape:
+{"date":"today's full date","sections":[{"label":"US Government & Policy","topline":"one sentence summary of biggest theme","stories":[{"tier":1,"headline":"Story headline","tag":"one of: regulation, legislation, enforcement, corporate, international, litigation, research","source":"Publication name","body":"2-3 sentence factual summary with specific names, bill numbers, dollar amounts.","so_what":"One sentence on why this matters for someone building an AI governance function at a media measurement company like Nielsen.","related":null,"sources":[{"label":"Publication: Article title","url":"https://..."}]}]},{"label":"International Governments","topline":"...","stories":[]},{"label":"Notable Corporate Actions","topline":"...","stories":[]},{"label":"Legal Disputes & Enforcement","topline":"...","stories":[]},{"label":"Research & Industry Reports","topline":"...","stories":[]}]}
+
+Include exactly these 5 sections in order. Each section needs a topline and 2-3 stories. Tier: 1=must-read, 2=worth-knowing, 3=FYI. Each story needs 2-3 real source URLs. Be specific — name companies, bills, agencies, dollar amounts. Focus on: EU AI Act implementation, US federal/state AI legislation, corporate AI governance, FTC/regulatory enforcement, think tank research (CSET, Brookings), media/data industry AI policy.`;
+
+  const messages = [{ role: 'user', content: PROMPT }];
+  const tools = [{ type: 'web_search_20250305', name: 'web_search' }];
+
+  // Agentic loop — keep going until stop_reason is 'end_turn'
+  for (let turn = 0; turn < 10; turn++) {
+    const responseBody = await anthropicPost({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 8000,
+      tools,
+      messages
+    });
+
+    console.log(`Turn ${turn + 1}: stop_reason=${responseBody.stop_reason}, content blocks=${responseBody.content.length}`);
+
+    // Add assistant response to message history
+    messages.push({ role: 'assistant', content: responseBody.content });
+
+    if (responseBody.stop_reason === 'end_turn') {
+      // Extract the final text block
+      const textBlock = responseBody.content.find(b => b.type === 'text');
+      if (textBlock) return textBlock.text;
+      throw new Error('end_turn reached but no text block found');
+    }
+
+    if (responseBody.stop_reason === 'tool_use') {
+      // Build tool results for all tool_use blocks
+      const toolResults = responseBody.content
+        .filter(b => b.type === 'tool_use')
+        .map(b => ({
+          type: 'tool_result',
+          tool_use_id: b.id,
+          content: b.input ? JSON.stringify(b.input) : 'Search completed'
+        }));
+      messages.push({ role: 'user', content: toolResults });
+      continue;
+    }
+
+    throw new Error(`Unexpected stop_reason: ${responseBody.stop_reason}`);
+  }
+
+  throw new Error('Exceeded maximum turns in Claude tool-use loop');
+}
+
+// ── Raw HTTPS call to Anthropic API ───────────────────────────────────────────
+function anthropicPost(body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const options = {
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'web-search-2025-03-05'
       }
-    }
-    // Stringify and search as fallback
-    candidates.push(JSON.stringify(body));
-  }
+    };
 
-  // Try to find a valid digest JSON in each candidate
-  for (const text of candidates) {
-    const cleaned = text
-      .replace(/^```json\s*/im, '')
-      .replace(/```\s*$/im, '')
-      .trim();
-
-    // Find the last { ... } block that contains "sections"
-    let searchFrom = 0;
-    let bestDigest = null;
-    while (true) {
-      const start = cleaned.indexOf('{', searchFrom);
-      if (start === -1) break;
-      const end = cleaned.lastIndexOf('}');
-      if (end <= start) break;
-      try {
-        const candidate = JSON.parse(cleaned.slice(start, end + 1));
-        if (candidate && Array.isArray(candidate.sections)) {
-          bestDigest = candidate;
+    const req = https.request(options, (res) => {
+      let raw = '';
+      res.on('data', chunk => raw += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          if (res.statusCode >= 400) {
+            reject(new Error(`Anthropic API error ${res.statusCode}: ${JSON.stringify(parsed)}`));
+          } else {
+            resolve(parsed);
+          }
+        } catch (e) {
+          reject(new Error('Failed to parse Anthropic response: ' + raw.substring(0, 200)));
         }
-      } catch (e) { /* keep searching */ }
-      searchFrom = start + 1;
-    }
-    if (bestDigest) return bestDigest;
-  }
+      });
+    });
 
-  throw new Error('Could not find valid digest JSON in request body. Body preview: ' +
-    JSON.stringify(body).substring(0, 400));
+    req.on('error', reject);
+    req.setTimeout(120000, () => { req.destroy(); reject(new Error('Anthropic API timeout')); });
+    req.write(data);
+    req.end();
+  });
+}
+
+// ── Extract digest JSON from Claude's text response ───────────────────────────
+function extractDigest(text) {
+  const cleaned = text.replace(/^```json\s*/im, '').replace(/```\s*$/im, '').trim();
+  const start = cleaned.indexOf('{');
+  const end   = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('No JSON object found in Claude response');
+  const parsed = JSON.parse(cleaned.slice(start, end + 1));
+  if (!parsed.sections || !Array.isArray(parsed.sections)) throw new Error('JSON missing sections array');
+  return parsed;
 }
 
 // ── POST /generate ────────────────────────────────────────────────────────────
 app.post('/generate', async (req, res) => {
   try {
-    const digest = extractDigest(req.body);
+    if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY environment variable not set');
+
+    console.log('Starting Claude API call with web search...');
+    const claudeText = await callClaude();
+    console.log('Claude response received, extracting digest...');
+
+    const digest = extractDigest(claudeText);
+    console.log(`Digest extracted: ${digest.sections.length} sections`);
 
     const docBuffer = await buildDoc(digest);
+    console.log('Doc built, converting to PDF...');
+
     const pdfBuffer = await convertToPdf(docBuffer);
+    console.log('PDF ready, sending response...');
 
     res.json({
       pdf_base64: pdfBuffer.toString('base64'),
-      filename: `governance-wire-${digest.date || 'today'}.pdf`
+      filename: `governance-wire-${(digest.date || 'today').replace(/[^a-z0-9-]/gi, '-')}.pdf`
     });
 
   } catch (err) {
-    console.error('Generation error:', err.message);
+    console.error('Pipeline error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
