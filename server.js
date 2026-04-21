@@ -26,7 +26,38 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // ── POST /generate ────────────────────────────────────────────────────────────
 app.post('/generate', async (req, res) => {
   try {
-    const digest = req.body;
+    let digest = req.body;
+
+    // Handle case where Make.com sends Claude's raw response body
+    // Claude's response has { content: [{ type: 'text', text: '...' }, ...] }
+    // We need to extract the JSON from the text block
+    if (digest && digest.content && Array.isArray(digest.content)) {
+      const textBlock = digest.content.find(b => b.type === 'text');
+      if (textBlock && textBlock.text) {
+        let raw = textBlock.text.trim()
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
+        const start = raw.indexOf('{');
+        const end   = raw.lastIndexOf('}');
+        if (start !== -1 && end !== -1) raw = raw.slice(start, end + 1);
+        digest = JSON.parse(raw);
+      }
+    }
+
+    // Handle case where body is a plain string (Make.com JSON string mode)
+    if (typeof digest === 'string') {
+      let raw = digest.trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const start = raw.indexOf('{');
+      const end   = raw.lastIndexOf('}');
+      if (start !== -1 && end !== -1) raw = raw.slice(start, end + 1);
+      digest = JSON.parse(raw);
+    }
 
     if (!digest || !digest.sections || !Array.isArray(digest.sections)) {
       return res.status(400).json({ error: 'Invalid digest JSON. Expected { date, sections: [...] }' });
