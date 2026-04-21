@@ -46,7 +46,7 @@ Include exactly these 5 sections in order. Each section needs a topline and 2-3 
   for (let turn = 0; turn < 10; turn++) {
     const responseBody = await anthropicPost({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 6000,
+      max_tokens: 4000,
       tools,
       messages
     });
@@ -159,14 +159,12 @@ app.post('/generate', async (req, res) => {
     console.log(`Digest extracted: ${digest.sections.length} sections`);
 
     const docBuffer = await buildDoc(digest);
-    console.log('Doc built, converting to PDF...');
+    console.log('Doc built, sending docx...');
 
-    const pdfBuffer = await convertToPdf(docBuffer);
-    console.log('PDF ready, sending response...');
-
+    const filename = 'governance-wire-' + (digest.date || 'today').replace(/[^a-z0-9-]/gi, '-') + '.docx';
     res.json({
-      pdf_base64: pdfBuffer.toString('base64'),
-      filename: `governance-wire-${(digest.date || 'today').replace(/[^a-z0-9-]/gi, '-')}.pdf`
+      pdf_base64: docBuffer.toString('base64'),
+      filename: filename
     });
 
   } catch (err) {
