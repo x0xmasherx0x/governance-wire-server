@@ -1,10 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // The Governance Wire — server.js
 // Deploy on Render.com (free tier, Node 18+)
-//
-// Endpoints:
-//   POST /generate   — accepts digest JSON, returns PDF as base64
-//   GET  /health     — health check for Render
 // ─────────────────────────────────────────────────────────────────────────────
 
 const express = require('express');
@@ -18,61 +14,77 @@ const {
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '4mb' }));
+app.use(express.text({ limit: '4mb' }));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// ── Extract digest JSON from any format Claude/Make might send ────────────────
+function extractDigest(body) {
+  // Collect all candidate text strings from the body
+  const candidates = [];
+
+  if (typeof body === 'string') {
+    candidates.push(body);
+  } else if (body && typeof body === 'object') {
+    // Already a parsed digest
+    if (body.sections) return body;
+    // Claude full API response: { content: [{ type, text }, ...] }
+    if (Array.isArray(body.content)) {
+      for (const block of body.content) {
+        if (block.type === 'text' && block.text) candidates.push(block.text);
+      }
+    }
+    // Stringify and search as fallback
+    candidates.push(JSON.stringify(body));
+  }
+
+  // Try to find a valid digest JSON in each candidate
+  for (const text of candidates) {
+    const cleaned = text
+      .replace(/^```json\s*/im, '')
+      .replace(/```\s*$/im, '')
+      .trim();
+
+    // Find the last { ... } block that contains "sections"
+    let searchFrom = 0;
+    let bestDigest = null;
+    while (true) {
+      const start = cleaned.indexOf('{', searchFrom);
+      if (start === -1) break;
+      const end = cleaned.lastIndexOf('}');
+      if (end <= start) break;
+      try {
+        const candidate = JSON.parse(cleaned.slice(start, end + 1));
+        if (candidate && Array.isArray(candidate.sections)) {
+          bestDigest = candidate;
+        }
+      } catch (e) { /* keep searching */ }
+      searchFrom = start + 1;
+    }
+    if (bestDigest) return bestDigest;
+  }
+
+  throw new Error('Could not find valid digest JSON in request body. Body preview: ' +
+    JSON.stringify(body).substring(0, 400));
+}
+
 // ── POST /generate ────────────────────────────────────────────────────────────
 app.post('/generate', async (req, res) => {
   try {
-    let digest = req.body;
-
-    // Handle case where Make.com sends Claude's raw response body
-    // Claude's response has { content: [{ type: 'text', text: '...' }, ...] }
-    // We need to extract the JSON from the text block
-    if (digest && digest.content && Array.isArray(digest.content)) {
-      const textBlock = digest.content.find(b => b.type === 'text');
-      if (textBlock && textBlock.text) {
-        let raw = textBlock.text.trim()
-          .replace(/^```json\s*/i, '')
-          .replace(/^```\s*/i, '')
-          .replace(/\s*```$/i, '')
-          .trim();
-        const start = raw.indexOf('{');
-        const end   = raw.lastIndexOf('}');
-        if (start !== -1 && end !== -1) raw = raw.slice(start, end + 1);
-        digest = JSON.parse(raw);
-      }
-    }
-
-    // Handle case where body is a plain string (Make.com JSON string mode)
-    if (typeof digest === 'string') {
-      let raw = digest.trim()
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-      const start = raw.indexOf('{');
-      const end   = raw.lastIndexOf('}');
-      if (start !== -1 && end !== -1) raw = raw.slice(start, end + 1);
-      digest = JSON.parse(raw);
-    }
-
-    if (!digest || !digest.sections || !Array.isArray(digest.sections)) {
-      return res.status(400).json({ error: 'Invalid digest JSON. Expected { date, sections: [...] }' });
-    }
+    const digest = extractDigest(req.body);
 
     const docBuffer = await buildDoc(digest);
-
-    // Convert docx → PDF using LibreOffice (pre-installed on Render)
     const pdfBuffer = await convertToPdf(docBuffer);
 
-    const base64 = pdfBuffer.toString('base64');
-    res.json({ pdf_base64: base64, filename: `governance-wire-${digest.date || 'today'}.pdf` });
+    res.json({
+      pdf_base64: pdfBuffer.toString('base64'),
+      filename: `governance-wire-${digest.date || 'today'}.pdf`
+    });
 
   } catch (err) {
-    console.error('Generation error:', err);
+    console.error('Generation error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
