@@ -40,13 +40,13 @@ Use exactly this shape:
 Include exactly these 5 sections in order. Each section needs a topline and 2-3 stories. Tier: 1=must-read, 2=worth-knowing, 3=FYI. Each story needs 2-3 real source URLs. Be specific — name companies, bills, agencies, dollar amounts. Focus on: EU AI Act implementation, US federal/state AI legislation, corporate AI governance, FTC/regulatory enforcement, think tank research (CSET, Brookings), media/data industry AI policy.`;
 
   const messages = [{ role: 'user', content: PROMPT }];
-  const tools = [{ type: 'web_search_20250305', name: 'web_search' }];
+  const tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
 
   // Agentic loop — keep going until stop_reason is 'end_turn'
   for (let turn = 0; turn < 10; turn++) {
     const responseBody = await anthropicPost({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 8000,
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4000,
       tools,
       messages
     });
@@ -57,26 +57,20 @@ Include exactly these 5 sections in order. Each section needs a topline and 2-3 
     messages.push({ role: 'assistant', content: responseBody.content });
 
     if (responseBody.stop_reason === 'end_turn') {
-      // Extract the final text block
-      const textBlock = responseBody.content.find(b => b.type === 'text');
-      if (textBlock) return textBlock.text;
-      throw new Error('end_turn reached but no text block found');
+      const allText = responseBody.content
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join(' ');
+      if (allText.trim()) return allText;
+      throw new Error('end_turn but no text. Block types: ' + responseBody.content.map(b=>b.type).join(', '));
     }
 
     if (responseBody.stop_reason === 'tool_use') {
-      // Build tool results for all tool_use blocks
-      const toolResults = responseBody.content
-        .filter(b => b.type === 'tool_use')
-        .map(b => ({
-          type: 'tool_result',
-          tool_use_id: b.id,
-          content: b.input ? JSON.stringify(b.input) : 'Search completed'
-        }));
-      messages.push({ role: 'user', content: toolResults });
+      console.log('Web search in progress, continuing...');
       continue;
     }
 
-    throw new Error(`Unexpected stop_reason: ${responseBody.stop_reason}`);
+    throw new Error('Unexpected stop_reason: ' + responseBody.stop_reason);
   }
 
   throw new Error('Exceeded maximum turns in Claude tool-use loop');
@@ -125,13 +119,31 @@ function anthropicPost(body) {
 
 // ── Extract digest JSON from Claude's text response ───────────────────────────
 function extractDigest(text) {
-  const cleaned = text.replace(/^```json\s*/im, '').replace(/```\s*$/im, '').trim();
-  const start = cleaned.indexOf('{');
-  const end   = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('No JSON object found in Claude response');
-  const parsed = JSON.parse(cleaned.slice(start, end + 1));
-  if (!parsed.sections || !Array.isArray(parsed.sections)) throw new Error('JSON missing sections array');
-  return parsed;
+  // Try multiple strategies to find valid digest JSON
+  const candidates = [text];
+  // Also try stripping markdown fences
+  candidates.push(text.replace(/^```json\s*/im, '').replace(/```\s*$/im, '').trim());
+
+  for (const candidate of candidates) {
+    // Find all { } blocks and try each, preferring the last one with sections
+    let pos = 0;
+    let best = null;
+    while (pos < candidate.length) {
+      const start = candidate.indexOf('{', pos);
+      if (start === -1) break;
+      const end = candidate.lastIndexOf('}');
+      if (end <= start) break;
+      try {
+        const parsed = JSON.parse(candidate.slice(start, end + 1));
+        if (parsed && Array.isArray(parsed.sections) && parsed.sections.length > 0) {
+          best = parsed;
+        }
+      } catch(e) {}
+      pos = start + 1;
+    }
+    if (best) return best;
+  }
+  throw new Error('No valid digest JSON found. Text preview: ' + text.substring(0, 300));
 }
 
 // ── POST /generate ────────────────────────────────────────────────────────────
