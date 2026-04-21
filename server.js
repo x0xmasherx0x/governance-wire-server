@@ -46,7 +46,7 @@ Include exactly these 5 sections in order. Each section needs a topline and 2-3 
   for (let turn = 0; turn < 10; turn++) {
     const responseBody = await anthropicPost({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 4000,
+      max_tokens: 6000,
       tools,
       messages
     });
